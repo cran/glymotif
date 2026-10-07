@@ -1,0 +1,102 @@
+
+<!-- README.md is generated from README.Rmd. Please edit that file -->
+
+# glymotif <a href="https://glycoverse.github.io/glymotif/"><img src="man/figures/logo.png" align="right" height="138" /></a>
+
+<!-- badges: start -->
+
+[![Lifecycle:
+experimental](https://img.shields.io/badge/lifecycle-experimental-orange.svg)](https://lifecycle.r-lib.org/articles/stages.html#experimental)
+[![R-universe
+version](https://glycoverse.r-universe.dev/glymotif/badges/version)](https://glycoverse.r-universe.dev/glymotif)
+[![R-CMD-check](https://github.com/glycoverse/glymotif/actions/workflows/R-CMD-check.yaml/badge.svg)](https://github.com/glycoverse/glymotif/actions/workflows/R-CMD-check.yaml)
+[![Codecov test
+coverage](https://codecov.io/gh/glycoverse/glymotif/graph/badge.svg)](https://app.codecov.io/gh/glycoverse/glymotif)
+<!-- badges: end -->
+
+Provides comprehensive tools for glycan motif analysis and detection in
+glycobioinformatics research. The package enables users to identify,
+count, and match glycan motifs (recurring substructures) within complex
+glycan structures using advanced subgraph isomorphism algorithms. It
+includes a curated database of known motifs from the GlycoMotif
+database, supports both concrete and generic monosaccharide matching,
+and offers flexible alignment options (core, terminal, or anywhere). Key
+functionalities include motif presence detection, occurrence counting,
+detailed node-to-node mapping, and batch analysis of multiple glycans
+against multiple motifs.
+
+## Installation
+
+Once glymotif is available on CRAN, you can install the latest release
+from [CRAN](https://CRAN.R-project.org/package=glymotif):
+
+``` r
+pak::pkg_install("glymotif")
+```
+
+Or from [r-universe](https://glycoverse.r-universe.dev/glymotif):
+
+``` r
+pak::repo_add(glycoverse = "https://glycoverse.r-universe.dev")
+pak::pkg_install("glymotif")
+```
+
+Or install the latest GitHub release:
+
+``` r
+pak::pkg_install("glycoverse/glymotif@*release")
+```
+
+Or install the development version from
+[GitHub](https://github.com/glycoverse/glymotif):
+
+``` r
+pak::pkg_install("glycoverse/glymotif")
+```
+
+## Documentation
+
+-   🚀 Get started:
+    [Here](https://glycoverse.github.io/glymotif/articles/glymotif.html)
+-   🔧 Motif matching rules:
+    [Here](https://glycoverse.github.io/glymotif/articles/motif-matching.html)
+-   📚 Reference:
+    [Here](https://glycoverse.github.io/glymotif/reference/index.html)
+
+## Role in `glycoverse`
+
+`glymotif` provides possibilities for one important job in
+glyco-bioinformatics: to detect motifs in glycans. The package is
+designed to be used directly by users for structural analysis, as well
+as to provide backend support for other packages in the `glycoverse`
+ecosystem.
+
+## Example
+
+``` r
+library(glymotif)
+library(glyparse)
+```
+
+Say we have a glycan, …
+
+``` r
+(glycan <- parse_iupac_condensed("Gal(b1-3)GlcNAc(b1-3)Gal(b1-3)GalNAc(a1-"))
+#> <glycan_structure[1]>
+#> [1] Gal(b1-3)GlcNAc(b1-3)Gal(b1-3)GalNAc(a1-
+#> # Unique structures: 1
+```
+
+… and we want to check if it has the O-Glycan core 1 motif.
+
+``` r
+have_motif(glycan, "Gal(b1-3)GalNAc(a1-", alignment = "core")
+#> [1] TRUE
+```
+
+Or use the motif name directly.
+
+``` r
+have_motif(glycan, "O-Glycan core 1")
+#> [1] TRUE
+```

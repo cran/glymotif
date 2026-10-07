@@ -1,0 +1,325 @@
+#' Count How Many Times Glycans have the Given Motif(s)
+#'
+#' These functions are closely related to [have_motif()].
+#' However, instead of returning logical values, they return the number of times
+#' the `glycans` have the `motif`(s).
+#' - `count_motif()` counts a single motif in multiple glycans
+#' - `count_motifs()` counts multiple motifs in multiple glycans
+#'
+#' @inheritParams have_motif
+#'
+#' @inheritSection have_motif About Names
+#' @inheritSection have_motif Floating parts and substituents
+#'
+#' @details
+#' This function actually perform v2f algorithm to get all possible matches
+#' between `glycans` and `motif`.
+#' However, the result is not necessarily the number of matches.
+#'
+#' Think about the following example:
+#' - glycan: `Gal(b1-?)[Gal(b1-?)]GlcNAc(b1-4)GlcNAc(b1-`
+#' - motif: `Gal(b1-?)[Gal(b1-?)]GlcNAc(b1-`
+#'
+#' To draw the glycan out:
+#' ```
+#' Gal 1
+#'    \ b1-? b1-4
+#'     GlcNAc -- GlcNAc b1-
+#'    / b1-?
+#' Gal 2
+#' ```
+#' To draw the motif out:
+#' ```
+#' Gal 1
+#'    \ b1-?
+#'     GlcNAc b1-
+#'    / b1-?
+#' Gal 2
+#' ```
+#'
+#' To differentiate the galactoses, we number them as "Gal 1" and "Gal 2"
+#' in both the glycan and the motif.
+#' The v2f subisomorphic algorithm will return two matches:
+#' - Gal 1 in the glycan matches Gal 1 in the motif, and Gal 2 matches Gal 2.
+#' - Gal 1 in the glycan matches Gal 2 in the motif, and Gal 2 matches Gal 1.
+#'
+#' However, from a biological perspective, the two matches are the same.
+#' This function will take care of this, and return the "unique" number of matches.
+#'
+#' For other details about the handling of monosaccharide, linkages, alignment,
+#' substituents, and implementation, see [have_motif()].
+#'
+#' @seealso [have_motif()], [have_motifs()]
+#'
+#' @return
+#' - `count_motif()`: An integer vector indicating how many times each `glycan` has the `motif`.
+#' - `count_motifs()`: An integer matrix where rows correspond to glycans and columns correspond to motifs.
+#'   Row names contain glycan identifiers and column names contain motif identifiers.
+#'
+#' @examples
+#' library(glyparse)
+#'
+#' count_motif("Gal(b1-3)Gal(b1-3)GalNAc(b1-", "Gal(b1-")
+#' count_motif(
+#'   "Man(b1-?)[Man(b1-?)]GalNAc(b1-4)GlcNAc(b1-",
+#'   "Man(b1-?)[Man(b1-?)]GalNAc(b1-"
+#' )
+#' count_motif("Gal(b1-3)Gal(b1-", "Man(b1-")
+#'
+#' # Vectorized usage with single motif
+#' count_motif(c("Gal(b1-3)Gal(b1-3)GalNAc(b1-", "Gal(b1-3)GalNAc(b1-"), "Gal(b1-")
+#'
+#' # Multiple motifs with count_motifs()
+#' glycan1 <- parse_iupac_condensed("Gal(b1-3)Gal(b1-3)GalNAc(b1-")
+#' glycan2 <- parse_iupac_condensed("Man(b1-?)[Man(b1-?)]GalNAc(b1-4)GlcNAc(b1-")
+#' glycans <- c(glycan1, glycan2)
+#'
+#' motifs <- c("Gal(b1-3)GalNAc(b1-", "Gal(b1-", "Man(b1-")
+#' result <- count_motifs(glycans, motifs)
+#' print(result)
+#'
+#' # Monosaccharide type matching examples
+#' # Concrete glycan vs generic motif: compatible residues match
+#' count_motif("Man(?1-", "Hex(?1-") # Returns 1
+#'
+#' # Generic glycan vs concrete motif: doesn't match
+#' count_motif("Hex(?1-", "Man(?1-") # Returns 0
+#'
+#' @export
+count_motif <- function(
+  glycans,
+  motif,
+  ...,
+  alignment = NULL,
+  ignore_linkages = FALSE,
+  strict_sub = TRUE,
+  match_degree = NULL,
+  mode = c("strict", "lenient"),
+  strict_floating = TRUE
+) {
+  rlang::check_dots_empty()
+
+  # Store input names before processing
+  glycan_names <- names(glycans)
+
+  params <- prepare_motif_args(
+    glycans = glycans,
+    motifs = motif,
+    alignments = alignment,
+    ignore_linkages = ignore_linkages,
+    match_degree = match_degree,
+    single_motif = TRUE,
+    strict_sub = strict_sub,
+    mode = mode,
+    strict_floating = strict_floating
+  )
+  result <- rlang::exec("count_motif_", !!!params)
+
+  # Apply names to result if input had names
+  if (!is.null(glycan_names)) {
+    names(result) <- glycan_names
+  }
+
+  result
+}
+
+#' @rdname count_motif
+#' @export
+count_motifs <- function(
+  glycans,
+  motifs,
+  ...,
+  alignments = NULL,
+  ignore_linkages = FALSE,
+  strict_sub = TRUE,
+  match_degree = NULL,
+  mode = c("strict", "lenient"),
+  strict_floating = TRUE
+) {
+  rlang::check_dots_empty()
+
+  params <- prepare_motif_args(
+    glycans = glycans,
+    motifs = motifs,
+    alignments = alignments,
+    ignore_linkages = ignore_linkages,
+    match_degree = match_degree,
+    single_motif = FALSE,
+    strict_sub = strict_sub,
+    mode = mode,
+    strict_floating = strict_floating
+  )
+  glycan_names <- prepare_struc_names(glycans, params$glycans)
+  # Use names from resolved motifs if available (e.g., from dynamic_motifs/branch_motifs)
+  # Otherwise fall back to prepare_motif_names on the original input
+  if (!is.null(names(params$motifs))) {
+    motif_names <- names(params$motifs)
+  } else {
+    motif_names <- prepare_motif_names(motifs)
+  }
+  rlang::exec(
+    "count_motifs_",
+    !!!params,
+    glycan_names = glycan_names,
+    motif_names = motif_names
+  )
+}
+
+#' Internal verison of `count_motif()`
+#'
+#' This function skips argument validation and conversion.
+#'
+#' @param glycans A `glyrepr_structure` object.
+#' @param motif A `glyrepr_structure` object with length 1.
+#' @param alignment A character scalar.
+#'   Possible values are "substructure", "core", "terminal", and "whole".
+#' @param ignore_linkages A logical value.
+#' @param strict_sub A logical value.
+#'
+#' @noRd
+count_motif_ <- function(
+  glycans,
+  motif,
+  alignment,
+  ignore_linkages = FALSE,
+  strict_sub = TRUE,
+  match_degree = NULL,
+  mode = "strict",
+  strict_floating = TRUE
+) {
+  # This function is a simpler version of `count_motif()`.
+  # It performs the logic directly without argument validations and conversions.
+  # It is a necessary abstraction for other functions.
+  apply_single_motif_to_glycans(
+    glycans = glycans,
+    motif = motif,
+    alignment = alignment,
+    ignore_linkages = ignore_linkages,
+    strict_sub = strict_sub,
+    match_degree = match_degree,
+    mode = mode,
+    strict_floating = strict_floating,
+    single_glycan_func = .count_motif_single,
+    smap_func = glyrepr::smap_int,
+    result_type = "integer"
+  )
+}
+
+.count_motif_single <- function(
+  glycan_graph,
+  motif_graph,
+  motif_has_linkages,
+  motif_composition_profile,
+  alignment,
+  ignore_linkages = FALSE,
+  strict_sub = TRUE,
+  match_degree = NULL,
+  mode = "strict",
+  glycan_batch_profile = NULL,
+  motif_batch_profile = NULL,
+  compatibility_cache = NULL
+) {
+  # This function is the logic part of `count_motif()`.
+  if (
+    !whole_alignment_size_can_match(
+      glycan_graph,
+      motif_graph,
+      alignment,
+      glycan_batch_profile = glycan_batch_profile,
+      motif_batch_profile = motif_batch_profile
+    )
+  ) {
+    return(0L)
+  }
+  if (
+    !core_alignment_root_can_match(
+      glycan_graph,
+      motif_graph,
+      alignment,
+      strict_sub = strict_sub,
+      mode = mode,
+      glycan_batch_profile = glycan_batch_profile,
+      motif_batch_profile = motif_batch_profile
+    )
+  ) {
+    return(0L)
+  }
+
+  linkage_match_mode <- resolve_linkage_match_mode(
+    glycan_graph,
+    motif_has_linkages,
+    ignore_linkages,
+    mode = mode,
+    glycan_batch_profile = glycan_batch_profile
+  )
+
+  # "none" is an early no-match result: the motif requires linkage information,
+  # but the glycan has none, so the count must be zero.
+  if (linkage_match_mode == "none") {
+    return(0L)
+  }
+
+  if (
+    !composition_can_match(
+      glycan_graph,
+      motif_composition_profile,
+      glycan_batch_profile = glycan_batch_profile,
+      motif_batch_profile = motif_batch_profile
+    )
+  ) {
+    return(0L)
+  }
+
+  res <- perform_compatible_vf2(
+    glycan_graph,
+    motif_graph,
+    alignment = alignment,
+    ignore_linkages = linkage_match_mode == "ignore",
+    strict_sub = strict_sub,
+    match_degree = match_degree,
+    mode = mode,
+    glycan_batch_profile = glycan_batch_profile,
+    motif_batch_profile = motif_batch_profile,
+    compatibility_cache = compatibility_cache
+  )
+  length(res)
+}
+
+#' Internal verison of `count_motifs()`
+#'
+#' This function skips argument validation and conversion.
+#'
+#' @param glycans A `glyrepr_structure` object.
+#' @param motifs A `glyrepr_structure` object.
+#' @param alignments A character vector with the same length as `motifs`.
+#' @param ignore_linkages A logical value.
+#' @param strict_sub A logical value.
+#'
+#' @noRd
+count_motifs_ <- function(
+  glycans,
+  motifs,
+  alignments,
+  glycan_names,
+  motif_names,
+  ignore_linkages = FALSE,
+  strict_sub = TRUE,
+  match_degree = NULL,
+  mode = "strict",
+  strict_floating = TRUE
+) {
+  apply_motifs_to_glycans(
+    glycans = glycans,
+    motifs = motifs,
+    alignments = alignments,
+    ignore_linkages = ignore_linkages,
+    single_glycan_func = .count_motif_single,
+    glycan_names = glycan_names,
+    motif_names = motif_names,
+    strict_sub = strict_sub,
+    match_degree = match_degree,
+    mode = mode,
+    strict_floating = strict_floating,
+    result_type = "integer"
+  )
+}

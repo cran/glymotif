@@ -1,0 +1,211 @@
+prepare_match_batch <- function(
+  glycans,
+  motifs,
+  mode = "strict",
+  strict_sub = TRUE,
+  ignore_linkages = FALSE
+) {
+  glycan_index <- index_unique_structures(glycans)
+  motif_index <- index_unique_structures(motifs)
+
+  glycan_graphs <- glycan_index$graphs
+  motif_graphs <- motif_index$graphs
+
+  glycan_monos <- purrr::map(
+    glycan_graphs,
+    graph_vertex_attr,
+    name = "mono"
+  )
+  motif_monos <- purrr::map(
+    motif_graphs,
+    graph_vertex_attr,
+    name = "mono"
+  )
+  exact_keys <- unique(c(
+    unlist(glycan_monos, use.names = FALSE),
+    unlist(motif_monos, use.names = FALSE)
+  ))
+
+  motif_composition_profiles <- purrr::map(
+    motif_graphs,
+    new_motif_composition_profile,
+    mode = mode
+  )
+  motif_key_modes <- purrr::map_chr(
+    motif_composition_profiles,
+    "key_mode"
+  )
+  base_keys <- if (any(motif_key_modes == "base")) {
+    unique(residue_base_keys(exact_keys))
+  } else {
+    NULL
+  }
+  generic_keys <- if (any(motif_key_modes == "generic")) {
+    generic_key_vectors <- c(
+      purrr::map(glycan_monos, composition_residue_keys, key_mode = "generic"),
+      purrr::map(motif_monos, composition_residue_keys, key_mode = "generic")
+    )
+    unique(unlist(generic_key_vectors, use.names = FALSE))
+  } else {
+    NULL
+  }
+
+  glycan_profiles <- purrr::map2(
+    glycan_graphs,
+    glycan_monos,
+    ~ new_batch_graph_profile(
+      .x,
+      .y,
+      exact_keys = exact_keys,
+      base_keys = base_keys,
+      generic_keys = generic_keys
+    )
+  )
+  motif_profiles <- purrr::map2(
+    motif_graphs,
+    seq_along(motif_graphs),
+    ~ new_batch_graph_profile(
+      .x,
+      motif_monos[[.y]],
+      exact_keys = exact_keys,
+      base_keys = base_keys,
+      generic_keys = generic_keys,
+      composition_profile = motif_composition_profiles[[.y]]
+    )
+  )
+
+  native_compatibility <- new_native_compatibility_cache(
+    glycan_profiles,
+    motif_profiles,
+    strict_sub = strict_sub,
+    ignore_linkages = ignore_linkages,
+    mode = mode
+  )
+
+  list(
+    glycan_profiles = glycan_profiles,
+    motif_profiles = motif_profiles,
+    native_compatibility = native_compatibility,
+    glycan_restore = glycan_index$restore,
+    motif_restore = motif_index$restore
+  )
+}
+
+index_unique_structures <- function(structures) {
+  codes <- unname(as.character(structures))
+  unique_codes <- unique(codes[!is.na(codes)])
+  first <- match(unique_codes, codes)
+  graphs <- if (length(first) == 0L) {
+    list()
+  } else {
+    glyrepr::get_structure_graphs(structures[first], return_list = TRUE)
+  }
+
+  list(
+    graphs = graphs,
+    restore = match(codes, unique_codes)
+  )
+}
+
+new_batch_graph_profile <- function(
+  graph,
+  monos,
+  exact_keys,
+  base_keys = NULL,
+  generic_keys = NULL,
+  composition_profile = NULL
+) {
+  subs <- graph_vertex_attr(graph, "sub")
+  native <- new_native_graph_profile(graph, monos = monos, subs = subs)
+  exact_ids <- match(monos, exact_keys)
+  base_ids <- if (is.null(base_keys)) {
+    NULL
+  } else {
+    match(residue_base_keys(monos), base_keys)
+  }
+  generic_ids <- if (is.null(generic_keys)) {
+    NULL
+  } else {
+    match(composition_residue_keys(monos, "generic"), generic_keys)
+  }
+
+  list(
+    graph = graph,
+    monos = monos,
+    subs = subs,
+    vcount = igraph::vcount(graph),
+    ecount = igraph::ecount(graph),
+    core = native$core,
+    has_linkages = graph_has_linkages(graph),
+    exact_counts = tabulate(exact_ids, nbins = length(exact_keys)),
+    base_counts = if (is.null(base_ids)) {
+      NULL
+    } else {
+      tabulate(base_ids, nbins = length(base_keys))
+    },
+    generic_counts = if (is.null(generic_ids)) {
+      NULL
+    } else {
+      tabulate(generic_ids, nbins = length(generic_keys))
+    },
+    composition_profile = composition_profile,
+    native = native
+  )
+}
+
+apply_batch_motif <- function(
+  batch,
+  motif_position,
+  alignment,
+  ignore_linkages,
+  strict_sub,
+  match_degree,
+  mode,
+  single_glycan_func,
+  result_type
+) {
+  motif_profile <- batch$motif_profiles[[
+    batch$motif_restore[[motif_position]]
+  ]]
+
+  apply_one <- function(glycan_profile) {
+    single_glycan_func(
+      glycan_graph = glycan_profile$graph,
+      motif_graph = motif_profile$graph,
+      motif_has_linkages = motif_profile$has_linkages,
+      motif_composition_profile = motif_profile$composition_profile,
+      alignment = alignment,
+      ignore_linkages = ignore_linkages,
+      strict_sub = strict_sub,
+      match_degree = match_degree,
+      mode = mode,
+      glycan_batch_profile = glycan_profile,
+      motif_batch_profile = motif_profile,
+      compatibility_cache = batch$native_compatibility
+    )
+  }
+
+  unique_results <- switch(
+    result_type,
+    logical = vapply(batch$glycan_profiles, apply_one, logical(1L)),
+    integer = vapply(batch$glycan_profiles, apply_one, integer(1L)),
+    list = lapply(batch$glycan_profiles, apply_one)
+  )
+
+  restore_batch_results(
+    unique_results,
+    batch$glycan_restore,
+    result_type
+  )
+}
+
+restore_batch_results <- function(results, restore, result_type) {
+  if (result_type != "list") {
+    return(results[restore])
+  }
+
+  restored <- vector("list", length(restore))
+  valid <- !is.na(restore)
+  restored[valid] <- results[restore[valid]]
+  restored
+}

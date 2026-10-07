@@ -1,0 +1,478 @@
+#' Extract Branch Motifs
+#'
+#' @description
+#' An N-glycan branching motif if the substructures linked to either the a3- or a6-core-mannose.
+#'
+#' For example:
+#'
+#' ```
+#' Neu5Ac - Gal - GlcNAc - Man
+#' ~~~~~~~~~~~~~~~~~~~~~      \
+#'   A branching motif         Man - GlcNAc - GlcNAc -
+#'                            /
+#'                         Man
+#' ```
+#'
+#' This function returns all the unique branching motifs found in the input glycans.
+#'
+#' If you want to perform branching motif matching in functions like `have_motifs()` or `glydet::quantify_motifs()`,
+#' use the [branch_motifs()] helper instead,
+#' which handles additional intricacies related to how the motifs should be matched.
+#'
+#' @param glycans One of:
+#'   - A [glyrepr::glycan_structure()] vector.
+#'   - A glycan structure string vector. All formats supported by [glyparse::auto_parse()] are accepted.
+#' @param ... These dots must be empty and are used only to force optional
+#'   arguments to be supplied by name.
+#' @param including_core A logical scalar. If `TRUE`, the N-glycan core structure
+#'   (`Man(??-?)Man(??-?)GlcNAc(??-?)GlcNAc(??-` or `Hex(??-?)Hex(??-?)HexNAc(??-?)HexNAc(??-`)
+#'   is appended to each branch motif. Concrete branches receive a concrete
+#'   core; generic and mixed branches receive a generic core. Default is
+#'   `FALSE`.
+#'
+#' @details
+#' The function works by:
+#' 1. Converting the input to a set of unique `glycan_structure` objects.
+#' 2. Searching for the N-glycan branch pattern: `HexNAc(??-?)Hex(??-?)Hex(??-?)HexNAc(??-?)HexNAc(??-`.
+#' 3. For each match, identifying the root node of the branch (the leftmost HexNAc in the pattern).
+#' 4. Extracting the full subtree rooted at that node.
+#' 5. Preserving the correct anomeric configuration (e.g., "b1") by inspecting the linkage to the root node.
+#'
+#' @return A [glyrepr::glycan_structure()] vector containing the unique extracted branching motifs.
+#'
+#' @examples
+#' glycans <- c(
+#'   "Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-6)]Man(b1-4)GlcNAc(a1-4)GlcNAc(b1-",
+#'   "Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-6)]Man(b1-4)GlcNAc(a1-4)GlcNAc(b1-"
+#' )
+#' extract_branch_motif(glycans)
+#'
+#' @export
+extract_branch_motif <- function(glycans, ..., including_core = FALSE) {
+  rlang::check_dots_empty()
+
+  checkmate::assert_flag(including_core)
+  # 1. Handle input types and deduplicate
+  glycans <- ensure_glycans_are_structures(glycans)
+  glycans <- unique(glycans)
+  .assert_n_glycans(glycans)
+
+  # 2. Define the motif
+  # The motif represents an N-glycan branch, rooted at the GlcNAc attached to the Mannose core.
+  motif <- glyrepr::as_glycan_structure(
+    "HexNAc(??-?)Hex(??-?)Hex(??-?)HexNAc(??-?)HexNAc(??-"
+  )
+
+  # 3. Find matches
+  # Use match_motif to find where the motif maps to the glycan
+  matches <- match_motif(glycans, motif, alignment = "core")
+
+  # 4. Extract subtrees
+  # matches is a list of lists: [[glycan_1_matches], [glycan_2_matches], ...]
+  # attributes(glycans, "structures") gives us the actual graphs
+
+  structure_graphs <- glyrepr::get_structure_graphs(glycans, return_list = TRUE)
+
+  roots <- lapply(matches, function(g_matches) {
+    vapply(g_matches, function(mapping) as.integer(mapping[[1]]), integer(1))
+  })
+  # Floating graph attributes need the existing per-occurrence construction.
+  if (any(vapply(structure_graphs, .has_floating_motif_parts, logical(1)))) {
+    extracted_subtrees <- .extract_branch_subtrees_r(structure_graphs, matches)
+  } else {
+    extracted_subtrees <- .extract_motif_candidates_native(
+      structure_graphs,
+      roots,
+      Inf,
+      branches = TRUE
+    )
+  }
+
+  if (length(extracted_subtrees) == 0) {
+    return(glyrepr::glycan_structure())
+  }
+
+  # Convert extracted graphs back to glycan_structure and return unique ones
+  res <- glyrepr::as_glycan_structure(extracted_subtrees)
+  res <- unique(res)
+
+  # Optionally append core structure
+  if (including_core && length(res) > 0) {
+    mono_type <- structure_mono_type(res)
+    core_suffix <- ifelse(
+      mono_type == "concrete",
+      "?)Man(??-?)Man(??-?)GlcNAc(??-?)GlcNAc(??-",
+      "?)Hex(??-?)Hex(??-?)HexNAc(??-?)HexNAc(??-"
+    )
+
+    res_chars <- as.character(res)
+    # Append core suffix to each branch (position is always ?)
+    res_chars <- paste0(res_chars, core_suffix)
+    res <- glyrepr::as_glycan_structure(res_chars)
+  }
+
+  res
+}
+
+.assert_n_glycans <- function(glycans) {
+  n_motif <- glyrepr::as_glycan_structure(
+    "Hex(??-?)[Hex(??-?)]Hex(??-?)HexNAc(??-?)HexNAc(??-"
+  )
+  have_n_motif <- have_motif(glycans, n_motif, alignment = "core")
+  if (!all(have_n_motif)) {
+    cli::cli_warn(c(
+      "!" = "Some of {.arg glycans} do not have the N-glycan core motif.",
+      "!" = "Those glycans are skipped."
+    ))
+  }
+}
+
+#' Extract All Substructures (Motifs)
+#'
+#' @description
+#' Extract all unique connected subgraphs (motifs) from the input glycans up to a specified size.
+#' This function can be useful combined with `count_motifs()` or `glydet::quantify_motifs()`.
+#' If so, set `alignment` to "substructure" for these functions.
+#'
+#' If you want to perform dynamic motif matching in functions like `have_motifs()` or `glydet::quantify_motifs()`,
+#' use the [dynamic_motifs()] helper instead,
+#' which handles additional intricacies related to how the motifs should be matched.
+#'
+#' @param glycans One of:
+#'   - A [glyrepr::glycan_structure()] vector.
+#'   - A glycan structure string vector. All formats supported by [glyparse::auto_parse()] are accepted.
+#' @param ... These dots must be empty and are used only to force optional
+#'   arguments to be supplied by name.
+#' @param max_size The maximum number of monosaccharides in the extracted motifs. Default is 3.
+#'   Note that setting this value very large can be computationally expensive.
+#'   Try the default value first, and increase it progressively if needed.
+#'
+#' @return A [glyrepr::glycan_structure()] vector containing the unique extracted motifs.
+#'
+#' @examples
+#' glycan <- "Gal(b1-3)[GlcNAc(a1-6)]GalNAc(a1-"
+#' extract_motif(glycan, max_size = 2)
+#'
+#' @export
+extract_motif <- function(glycans, ..., max_size = 3) {
+  rlang::check_dots_empty()
+
+  glycans <- ensure_glycans_are_structures(glycans)
+  glycans <- unique(glycans)
+  structure_graphs <- glyrepr::get_structure_graphs(glycans, return_list = TRUE)
+  if (is.numeric(max_size) && length(max_size) == 1L && !is.na(max_size)) {
+    extracted_subtrees <- .extract_motif_candidates_native(
+      structure_graphs,
+      lapply(structure_graphs, graph_vertex_ids),
+      max_size
+    )
+  } else {
+    seen_motifs <- new.env(hash = TRUE, parent = emptyenv())
+    extracted_subtrees <- unlist(
+      lapply(structure_graphs, function(g) {
+        .extract_motifs_from_graph(g, max_size, seen_motifs)
+      }),
+      recursive = FALSE
+    )
+  }
+
+  if (length(extracted_subtrees) == 0) {
+    return(glyrepr::glycan_structure())
+  }
+
+  res <- glyrepr::as_glycan_structure(extracted_subtrees)
+  unique(res)
+}
+
+.extract_motifs_from_graph <- function(g, max_size, seen_motifs) {
+  nodes <- graph_vertex_ids(g)
+  key_context <- .new_motif_key_context(g)
+
+  unlist(
+    purrr::map(nodes, function(node) {
+      .extract_motifs_rooted_at(
+        g,
+        node,
+        max_size,
+        seen_motifs,
+        key_context
+      )
+    }),
+    recursive = FALSE
+  )
+}
+
+.extract_motifs_rooted_at <- function(
+  g,
+  root_id,
+  max_size,
+  seen_motifs,
+  key_context
+) {
+  subsets <- .find_connected_subsets(g, root_id, max_size)
+  anomer <- .get_node_anomer(g, root_id)
+
+  subtrees <- purrr::map(subsets, function(subset_nodes) {
+    key <- .motif_candidate_key(
+      key_context,
+      root_id,
+      subset_nodes,
+      anomer
+    )
+    if (exists(key, envir = seen_motifs, inherits = FALSE)) {
+      return(NULL)
+    }
+    assign(key, TRUE, envir = seen_motifs)
+
+    subtree <- igraph::induced_subgraph(g, subset_nodes)
+    subtree$anomer <- anomer
+    subtree
+  })
+
+  purrr::compact(subtrees)
+}
+
+.new_motif_key_context <- function(g) {
+  node_count <- igraph::vcount(g)
+  children <- rep(list(integer()), node_count)
+  child_linkages <- rep(list(character()), node_count)
+  edges <- igraph::as_edgelist(g, names = FALSE)
+
+  if (nrow(edges) > 0) {
+    linkages <- graph_edge_attr(g, "linkage")
+    for (edge_id in seq_len(nrow(edges))) {
+      parent <- edges[edge_id, 1]
+      children[[parent]] <- c(children[[parent]], edges[edge_id, 2])
+      child_linkages[[parent]] <- c(
+        child_linkages[[parent]],
+        linkages[[edge_id]]
+      )
+    }
+  }
+
+  list(
+    mono = graph_vertex_attr(g, "mono"),
+    sub = graph_vertex_attr(g, "sub"),
+    children = children,
+    child_linkages = child_linkages
+  )
+}
+
+.motif_candidate_key <- function(context, root_id, subset_nodes, anomer) {
+  selected <- rep(FALSE, length(context$children))
+  selected[subset_nodes] <- TRUE
+
+  encode_node <- NULL
+  encode_node <- function(node_id) {
+    children <- context$children[[node_id]]
+    child_tokens <- character()
+
+    if (length(children) > 0) {
+      included <- selected[children]
+      children <- children[included]
+      linkages <- context$child_linkages[[node_id]][included]
+      child_tokens <- vapply(
+        seq_along(children),
+        function(i) {
+          paste0(
+            "E",
+            .motif_key_field(linkages[[i]]),
+            .motif_key_field(encode_node(children[[i]]))
+          )
+        },
+        character(1)
+      )
+      child_tokens <- sort(child_tokens)
+    }
+
+    paste0(
+      "N",
+      .motif_key_field(context$mono[[node_id]]),
+      .motif_key_field(context$sub[[node_id]]),
+      .motif_key_field(paste0(child_tokens, collapse = ""))
+    )
+  }
+
+  paste0(
+    "R",
+    .motif_key_field(anomer),
+    .motif_key_field(encode_node(root_id))
+  )
+}
+
+.motif_key_field <- function(value) {
+  if (length(value) == 0 || is.na(value)) {
+    return("M")
+  }
+
+  value <- enc2utf8(as.character(value))
+  paste0(nchar(value, type = "bytes"), ":", value)
+}
+
+.get_node_anomer <- function(g, node_id) {
+  in_edges <- graph_incident_edge_ids(g, node_id, mode = "in")
+  if (length(in_edges) == 0) {
+    return(g$anomer)
+  }
+
+  linkage <- graph_edge_attr(g, "linkage", in_edges)
+  # Linkage format: "b1-4". We want "b1".
+  stringr::str_split_i(linkage, "-", 1)
+}
+
+# Helper function to find connected subsets rooted at 'node'
+# Returns a list of vectors, each vector containing node IDs.
+.find_connected_subsets <- function(g, root, max_size) {
+  results <- list(c(root))
+
+  if (max_size <= 1) {
+    return(results)
+  }
+
+  children <- graph_neighbor_ids(g, root, mode = "out")
+  if (length(children) == 0) {
+    return(results)
+  }
+
+  # Recursive step and combination
+  child_combinations <- .combine_child_subsets(g, children, max_size - 1)
+
+  for (combo in child_combinations) {
+    results[[length(results) + 1]] <- c(root, combo)
+  }
+
+  results
+}
+
+.combine_child_subsets <- function(g, children, remaining_size) {
+  child_subsets_list <- purrr::map(children, function(child) {
+    .find_connected_subsets(g, child, remaining_size)
+  })
+
+  choices_per_child <- purrr::map(child_subsets_list, function(subsets) {
+    # Choice 0 is empty (pick nothing from this child)
+    c(list(numeric(0)), subsets)
+  })
+
+  # Cartesian product of choices
+  # We use purrr::map(choices_per_child, seq_along) to get indices for expand.grid
+  all_combinations <- expand.grid(purrr::map(choices_per_child, seq_along))
+
+  valid_combos <- list()
+
+  for (i in seq_len(nrow(all_combinations))) {
+    combination_idx <- as.numeric(all_combinations[i, ])
+    current_nodes <- numeric(0)
+    current_size <- 0
+
+    for (j in seq_along(combination_idx)) {
+      choice_idx <- combination_idx[j]
+      chosen_subset <- choices_per_child[[j]][[choice_idx]]
+
+      size_incr <- length(chosen_subset)
+      if (size_incr > 0) {
+        current_nodes <- c(current_nodes, chosen_subset)
+        current_size <- current_size + size_incr
+      }
+    }
+
+    # We only want combinations that add something (size > 0) and fit in remaining_size
+    if (current_size > 0 && current_size <= remaining_size) {
+      valid_combos[[length(valid_combos) + 1]] <- current_nodes
+    }
+  }
+
+  valid_combos
+}
+
+.has_floating_motif_parts <- function(g) {
+  length(igraph::graph_attr(g, "floating_parts")) > 0L ||
+    length(igraph::graph_attr(g, "floating_substituents")) > 0L
+}
+
+.extract_motif_candidates_native <- function(
+  graphs,
+  roots,
+  max_size,
+  branches = FALSE
+) {
+  contexts <- lapply(graphs, function(g) {
+    context <- .new_motif_key_context(g)
+    anomers <- rep(g$anomer, igraph::vcount(g))
+    edges <- igraph::as_edgelist(g, names = FALSE)
+    if (nrow(edges) > 0L) {
+      anomers[edges[, 2]] <- stringr::str_split_i(
+        graph_edge_attr(g, "linkage"),
+        "-",
+        1
+      )
+    }
+    context$anomers <- anomers
+    context
+  })
+  candidates <- cpp_extract_motif_candidates(
+    contexts,
+    roots,
+    max_size,
+    branches
+  )
+  lapply(candidates, function(candidate) {
+    subtree <- igraph::induced_subgraph(
+      graphs[[candidate$graph]],
+      candidate$nodes
+    )
+    subtree$anomer <- candidate$anomer
+    subtree
+  })
+}
+
+.extract_branch_subtrees_r <- function(structure_graphs, matches) {
+  extracted_subtrees <- list()
+
+  for (i in seq_along(structure_graphs)) {
+    g <- structure_graphs[[i]]
+    g_matches <- matches[[i]]
+
+    if (length(g_matches) == 0) {
+      next
+    }
+
+    for (match_idx in g_matches) {
+      # The match_idx is a vector of node indices in 'g' corresponding to nodes in 'motif'.
+      # The first node of the motif (HexNAc) is the root of the branch.
+      # We assume the motif string was parsed such that the first node is indeed the root HexNAc.
+      # In glyrepr/igraph, nodes are 1-indexed.
+
+      branch_root_id <- match_idx[1]
+
+      # Extract the subtree rooted at branch_root_id
+      subtree_nodes <- graph_subcomponent_ids(
+        g,
+        branch_root_id,
+        mode = "out"
+      )
+      subtree <- igraph::induced_subgraph(g, subtree_nodes)
+
+      # 5. Handle Anomer
+      # The subtree needs an 'anomer' attribute (e.g., "b1").
+      # This information is contained in the linkage of the INCOMING edge to branch_root_id in 'g'.
+
+      # Find the incoming edge to the branch root in the original graph
+      in_edges <- graph_incident_edge_ids(g, branch_root_id, mode = "in")
+
+      # There should be exactly one incoming edge for a tree structure (unless it's the absolute root)
+      linkage <- graph_edge_attr(g, "linkage", in_edges)
+      # Linkage format is like "b1-4" or "a1-3" or "??-?".
+      # We need to extract the anomer part (first 2 chars usually, e.g. "b1", "a1", "??")
+
+      # Simple parsing logic (assuming standard format like "a1-..." or "b1-...")
+      # We can split by "-"
+      anomer_part <- stringr::str_split_i(linkage, "-", 1)
+      subtree$anomer <- anomer_part
+
+      extracted_subtrees[[length(extracted_subtrees) + 1]] <- subtree
+    }
+  }
+
+  extracted_subtrees
+}

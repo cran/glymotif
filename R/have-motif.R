@@ -1,0 +1,566 @@
+#' Check if the Glycans have the Given Motif(s)
+#'
+#' @description
+#' These functions check if the given `glycan`s have the given `motif`(s).
+#' - `have_motif()` checks a single motif against multiple glycans
+#' - `have_motifs()` checks multiple motifs against multiple glycans
+#'
+#' Technically speaking, they perform subgraph isomorphism tests to
+#' determine if the `motif`(s) are subgraphs of the `glycan`s.
+#' Monosaccharides, linkages, and substituents are all considered.
+#'
+#' @details
+#' # About Names
+#'
+#' `have_motif()` and `count_motif()` perserve names from the input `glycans` vector.
+#'
+#' `have_motifs()` and `count_motifs()` return a matrix with both row and column names.
+#' The row names are the glycan names, and the column names are the motif names.
+#'
+#' Glycan names follow the same rule as `have_motif()` and `count_motif()`.
+#'
+#' Motif names have the following rules:
+#'
+#' 1. If `motifs` have names, use the names.
+#' 2. If `motifs` don't have names and are GGM database motif names (e.g. "N-glycan core"), use them.
+#' 3. Otherwise, no colnames.
+#'
+#' # Monosaccharide type
+#'
+#' Glycans and motifs can each contain concrete residues, generic residues, or
+#' a mixture of both. Structure vectors can likewise combine concrete, generic,
+#' and mixed elements. Matching is performed residue by residue for every
+#' glycan-motif pair; structures are not converted as a whole.
+#'
+#' In the default strict mode:
+#' - Concrete glycan residues match the same concrete motif residue.
+#' - Concrete glycan residues also match compatible generic motif residues.
+#' - Generic glycan residues do not match concrete motif residues.
+#' - Generic glycan residues match the same generic motif residue.
+#' - Concrete residues with different identities never match.
+#'
+#' Examples:
+#' - `Man` (concrete glycan) vs `Hex` (generic motif) → TRUE
+#' - `Hex` (generic glycan) vs `Man` (concrete motif) → FALSE
+#' - `Man` (concrete glycan) vs `Man` (concrete motif) → TRUE
+#' - `Hex` (generic glycan) vs `Hex` (generic motif) → TRUE
+#' - `Gal(b1-3)GalNAc` (concrete glycan) vs `Hex(b1-3)GalNAc`
+#'   (mixed motif) → TRUE
+#'
+#' With `mode = "lenient"`, compatibility becomes bidirectional: generic glycan
+#' residues can also match compatible concrete motif residues. For example,
+#' `Hex` can match a `Gal` motif residue, but `HexNAc` still cannot match `Gal`.
+#'
+#' # Linkages
+#'
+#' Obscure linkages (e.g. "??-?") are allowed in the `motif` graph
+#' (see [glyrepr::possible_linkages()]).
+#' "?" in a motif graph means "anything could be OK",
+#' so it will match any linkage in the `glycan` graph.
+#' However, "?" in a `glycan` graph will only match "?" in the `motif` graph.
+#' You can set `ignore_linkages = TRUE` to ignore linkages in the comparison.
+#'
+#' Some examples:
+#' - "b1-?" in motif will match "b1-4" in glycan.
+#' - "b1-?" in motif will match "b1-?" in glycan.
+#' - "b1-4" in motif will NOT match "b1-?" in glycan.
+#' - "a1-?" in motif will NOT match "b1-4" in glycan.
+#' - "a1-?" in motif will NOT match "a?-4" in glycan.
+#'
+#' Both motifs and glycans can have a "half-linkage" at the reducing end,
+#' e.g. "GlcNAc(b1-".
+#' The half linkage in the motif will be matched to any linkage in the glycan,
+#' or the half linkage of the glycan.
+#' e.g. Glycan "GlcNAc(b1-4)Gal(a1-" will have both "GlcNAc(b1-" and "Gal(a1-" motifs.
+#'
+#' # Matching mode
+#'
+#' `mode = "strict"` is the default and preserves the standard rule that
+#' glycans cannot be more obscure than motifs. For example,
+#' glycan "Gal(?1-?)GalNAc(?1-" does not match motif "Gal(b1-3)GalNAc(a1-".
+#'
+#' `mode = "lenient"` treats obscure glycan-side monosaccharides, linkages,
+#' substituent positions, and reducing-end anomers as compatible with more
+#' specific motif fields. In the lenient mode,
+#' glycan "Gal(?1-?)GalNAc(?1-" matches motif "Gal(b1-3)GalNAc(a1-".
+#' Concrete mismatches still fail: for example,
+#' glycan "Gal(?1-6)GalNAc(a1-" does not match motif "Gal(b1-3)GalNAc(a1-".
+#'
+#' # Floating parts and substituents
+#'
+#' Glycans with unresolved floating parts or substituents are matched across
+#' every conflict-free localization allowed by their candidate-parent domains.
+#' `strict_floating = TRUE` requires a match in every localization, while
+#' `strict_floating = FALSE` requires a match in at least one localization.
+#' This setting is independent of `mode`, which controls residue and linkage
+#' obscurity.
+#'
+#' [count_motif()] and [count_motifs()] return the minimum count across
+#' localizations in strict-floating mode and the maximum count otherwise.
+#' [match_motif()] and [match_motifs()] return the union of node mappings from
+#' every localization, using node indices from the original unresolved
+#' structure.
+#'
+#' Motifs must be connected structures and therefore cannot themselves contain
+#' unresolved floating parts or substituents.
+#'
+#' Matching supports up to 256 raw candidate-parent combinations per glycan.
+#' Localize floating parts and substituents with
+#' [glyrepr::localize_floating_parts()] first for larger domains.
+#'
+#' # Alignment
+#'
+#' According to the [GlycoMotif](https://glycomotif.glyomics.org) database,
+#' a motif can be classified into four alignment types:
+#' - "substructure": The motif can be anywhere in the glycan. This is the default.
+#' See [substructure](https://glycomotif.glyomics.org/glycomotif/Substructure_Alignment)
+#' for details.
+#' - "core": The motif must align with at least one connected substructure
+#' (subtree) at the reducing end of the glycan.
+#' See [glycan core](https://glycomotif.glyomics.org/glycomotif/Glycan_Core_Alignment)
+#' for details.
+#' - "terminal": The motif must align with at least one connected substructure
+#' (subtree) at the nonreducing end of the glycan.
+#' See [nonreducing end](https://glycomotif.glyomics.org/glycomotif/Nonreducing-End_Alignment)
+#' for details.
+#' - "whole": The motif must align with the entire glycan.
+#' See [whole-glycan](https://glycomotif.glyomics.org/glycomotif/Whole-Glycan_Alignment)
+#' for details.
+#'
+#' When using named motifs in the GlycoMotif GlyGen Collection (GGM),
+#' the best practice is to not provide the `alignment` argument,
+#' and let the function decide the alignment based on the motif name.
+#' However, it is still possible to override the default alignments.
+#' In this case, the user-provided alignments will be used,
+#' but a warning will be issued.
+#' Only GGM motif names are accepted as character name inputs through the
+#' `motif` and `motifs` arguments. To use motifs from other database
+#' collections, pass [db_motifs()] with the desired `source_id` or pass
+#' structures from [db_motif_info()] explicitly.
+#' When `match_degree` is provided, `alignment` and `alignments` are ignored
+#' without warning.
+#'
+#' # Degree matching
+#'
+#' `match_degree` is used to require exact degree matching for specific motif nodes.
+#' For each node marked `TRUE`, the matched glycan node must have the same in-degree
+#' and out-degree as the motif node. Nodes marked `FALSE` do not enforce degree
+#' equality. This is useful to prevent matches where the motif node is embedded in
+#' a more highly branched glycan region (extra outgoing edges) or has extra incoming
+#' connections compared to the motif.
+#'
+#' # Substituents
+#'
+#' Substituents (e.g. "Ac", "SO3") are matched in strict mode.
+#' Both single and multiple substituents are supported:
+#' - Single substituents: "Neu5Ac-9Ac" will only match "Neu5Ac-9Ac" but not "Neu5Ac"
+#' - Multiple substituents: "Glc3Me6S" (has both 3Me and 6S) will only match motifs
+#'   that contain both substituents, e.g., "Glc3Me6S", "Glc?Me6S", "Glc3Me?S"
+#' - "Glc3Me6S" will NOT match "Glc3Me" (missing 6S) or "Glc" (missing both)
+#'
+#' For multiple substituents, they are internally stored as comma-separated values
+#' (e.g. "3Me,6S") and matched individually. Each substituent in the motif must
+#' have a corresponding match in the glycan, and vice versa.
+#'
+#' Obscure linkages in motif substituents will match any linkage in glycan substituents:
+#' - Motif "Neu5Ac?Ac" will match "Neu5Ac9Ac" in the glycan
+#' - Motif "Glc?Me6S" will match "Glc3Me6S" in the glycan (? matches 3)
+#' - Motif "Glc3Me?S" will match "Glc3Me6S" in the glycan (? matches 6)
+#'
+#' Fuzzy built-in residue modifications in motifs also match fully specified
+#' target glycans. For example, motif "Gal?NAc" matches glycan "GalNAc",
+#' and motif "Neu?Ac" matches glycan "Neu5Ac".
+#'
+#' This default behavior is reasonable for most cases,
+#' because monosaccharides with different substituents should be regarded as different.
+#' However, you can change this behavior by setting `strict_sub = FALSE`.
+#' In this case, the substituent is optional in the motif,
+#' so the glycan "Neu5Ac9Ac" can match the motif "Neu5Ac".
+#'
+#' # Implementation
+#'
+#' Under the hood, the function uses Boost Graph's VF2 subgraph monomorphism
+#' algorithm. Custom vertex and edge compatibility predicates enforce residue,
+#' substituent, linkage, anomer, alignment, and degree constraints during the
+#' search. The function returns `TRUE` as soon as a compatible mapping is found.
+#'
+#' @param glycans One of:
+#'   - A [glyrepr::glycan_structure()] vector.
+#'   - A glycan structure string vector. All formats supported by [glyparse::auto_parse()] are accepted,
+#'     including IUPAC-condensed, WURCS, GlycoCT, and others.
+#' @param motif One of:
+#'   - A [glyrepr::glycan_structure()] scalar.
+#'   - A glycan structure string, supported by [glyparse::auto_parse()].
+#'   - A GGM database motif name (use `db_motif_info() |> dplyr::filter(source_id == "GGM")`
+#'     to inspect resolvable motif names).
+#' @param motifs One of:
+#'   - A [glyrepr::glycan_structure()] vector.
+#'   - A glycan structure string vector, supported by [glyparse::auto_parse()].
+#'   - A character vector of GGM database motif names
+#'     (use `db_motif_info() |> dplyr::filter(source_id == "GGM")`
+#'     to inspect resolvable motif names).
+#' @param ... These dots must be empty and are used only to force optional
+#'   arguments to be supplied by name.
+#' @param alignment A character string.
+#'   Possible values are "substructure", "core", "terminal", and "whole".
+#'   If not provided, the value will be decided based on the `motif` argument.
+#'   If `motif` is a GGM motif name, the alignment in the database will be used.
+#'   Otherwise, "substructure" will be used.
+#' @param alignments A character vector specifying alignment types for each motif.
+#'   Can be a single value (applied to all motifs) or a vector of the same length as motifs.
+#' @param match_degree A logical vector indicating which motif nodes must match the
+#'   glycan's in- and out-degree exactly. For `have_motif()`, `count_motif()`, and
+#'   `match_motif()`, this must be a logical vector with length 1 or the number of
+#'   motif nodes (length 1 is recycled). For `have_motifs()`, `count_motifs()`, and
+#'   `match_motifs()`, this must be a list of logical vectors with length equal to
+#'   `motifs`; each element follows the same length rules. When `match_degree` is
+#'   provided, `alignment` and `alignments` are silently ignored.
+#' @param ignore_linkages A logical value. If `TRUE`, linkages will be ignored in the comparison.
+#'   Default is `FALSE`.
+#' @param strict_sub A logical value. If `TRUE` (default), substituents will be matched in strict mode,
+#'   which means if the glycan has a substituent in some residue,
+#'   the motif must have the same substituent to be matched.
+#' @param mode Matching mode. `"strict"` preserves the default behavior where
+#'   glycans cannot be more obscure than motifs. `"lenient"` treats glycan-side
+#'   obscure fields as compatible with more specific motif fields while still
+#'   rejecting concrete mismatches.
+#' @param strict_floating A logical value. If `TRUE` (default), a motif is
+#'   present only when it occurs in every conflict-free localization of any
+#'   floating glycan parts or substituents. If `FALSE`, a motif is present when
+#'   it occurs in at least one possible localization.
+#'
+#' @returns
+#' - `have_motif()`: A logical vector indicating if each `glycan` has the `motif`.
+#' - `have_motifs()`: A logical matrix where rows correspond to glycans and columns correspond to motifs.
+#'   Row names contain glycan identifiers and column names contain motif identifiers.
+#'
+#' @seealso [count_motif()], [count_motifs()], [glyparse::auto_parse()]
+#'
+#' @examples
+#' library(glyparse)
+#' library(glyrepr)
+#'
+#' (glycan <- o_glycan_core_2(mono_type = "concrete"))
+#'
+#' # The glycan has the motif "Gal(b1-3)GalNAc(b1-"
+#' have_motif(glycan, "Gal(b1-3)GalNAc(b1-")
+#'
+#' # But not "Gal(b1-4)GalNAc(b1-" (wrong linkage)
+#' have_motif(glycan, "Gal(b1-4)GalNAc(b1-")
+#'
+#' # Set `ignore_linkages` to `TRUE` to ignore linkages
+#' have_motif(glycan, "Gal(b1-4)GalNAc(b1-", ignore_linkages = TRUE)
+#'
+#' # Different monosaccharide types are allowed
+#' have_motif(glycan, "Hex(b1-3)HexNAc(?1-")
+#'
+#' # Obscure linkages in the `motif` graph are allowed
+#' have_motif(glycan, "Gal(b1-?)GalNAc(?1-")
+#'
+#' # However, obscure linkages in `glycan` will only match "?" in the `motif` graph
+#' glycan_2 <- parse_iupac_condensed("Gal(b1-?)[GlcNAc(b1-6)]GalNAc(?1-")
+#' have_motif(glycan_2, "Gal(b1-3)GalNAc(?1-")
+#' have_motif(glycan_2, "Gal(b1-?)GalNAc(?1-")
+#'
+#' # The anomer of the motif will be matched to linkages in the glycan
+#' have_motif(glycan_2, "GlcNAc(b1-")
+#'
+#' # Alignment types
+#' # The default type is "substructure", which means the motif can be anywhere in the glycan.
+#' # Other options include "core", "terminal" and "whole".
+#' glycan_3 <- parse_iupac_condensed("Gal(a1-3)Gal(a1-4)Gal(a1-6)Gal(a1-")
+#' motifs <- c(
+#'   "Gal(a1-3)Gal(a1-4)Gal(a1-6)Gal(a1-",
+#'   "Gal(a1-3)Gal(a1-4)Gal(a1-",
+#'   "Gal(a1-4)Gal(a1-6)Gal(a1-",
+#'   "Gal(a1-4)Gal(a1-"
+#' )
+#'
+#' purrr::map_lgl(motifs, ~ have_motif(glycan_3, .x, alignment = "whole"))
+#' purrr::map_lgl(motifs, ~ have_motif(glycan_3, .x, alignment = "core"))
+#' purrr::map_lgl(motifs, ~ have_motif(glycan_3, .x, alignment = "terminal"))
+#' purrr::map_lgl(motifs, ~ have_motif(glycan_3, .x, alignment = "substructure"))
+#'
+#' # Substituents
+#' glycan_4 <- "Neu5Ac9Ac(a2-3)Gal(b1-4)GlcNAc(b1-"
+#' glycan_5 <- "Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-"
+#'
+#' have_motif(glycan_4, glycan_5)
+#' have_motif(glycan_5, glycan_4)
+#' have_motif(glycan_4, glycan_4)
+#' have_motif(glycan_5, glycan_5)
+#'
+#' have_motif(glycan_4, glycan_5, strict_sub = FALSE)
+#' have_motif(glycan_5, glycan_4, strict_sub = FALSE)
+#' have_motif(glycan_4, glycan_4, strict_sub = FALSE)
+#' have_motif(glycan_5, glycan_5, strict_sub = FALSE)
+#'
+#' # Multiple substituents
+#' glycan_6 <- "Glc3Me6S(a1-" # has both 3Me and 6S substituents
+#' have_motif(glycan_6, "Glc3Me6S(a1-") # TRUE: exact match
+#' have_motif(glycan_6, "Glc?Me6S(a1-") # TRUE: obscure linkage ?Me matches 3Me
+#' have_motif(glycan_6, "Glc3Me?S(a1-") # TRUE: obscure linkage ?S matches 6S
+#' have_motif(glycan_6, "Glc3Me(a1-") # FALSE: missing 6S substituent
+#' have_motif(glycan_6, "Glc(a1-") # FALSE: missing all substituents
+#'
+#' # Vectorization with single motif
+#' glycans <- c(glycan, glycan_2, glycan_3)
+#' motif <- "Gal(b1-3)GalNAc(b1-"
+#' have_motif(glycans, motif)
+#'
+#' # Multiple motifs with have_motifs()
+#' glycan1 <- o_glycan_core_2(mono_type = "concrete")
+#' glycan2 <- parse_iupac_condensed("Gal(b1-?)[GlcNAc(b1-6)]GalNAc(b1-")
+#' glycans <- c(glycan1, glycan2)
+#'
+#' motifs <- c("Gal(b1-3)GalNAc(b1-", "Gal(b1-4)GalNAc(b1-", "GlcNAc(b1-6)GalNAc(b1-")
+#' have_motifs(glycans, motifs)
+#'
+#' # You can assign each motif a name
+#' motifs <- c(
+#'   motif1 = "Gal(b1-3)GalNAc(b1-",
+#'   motif2 = "Gal(b1-4)GalNAc(b1-",
+#'   motif3 = "GlcNAc(b1-6)GalNAc(b1-"
+#' )
+#' have_motifs(glycans, motifs)
+#'
+#' @export
+have_motif <- function(
+  glycans,
+  motif,
+  ...,
+  alignment = NULL,
+  ignore_linkages = FALSE,
+  strict_sub = TRUE,
+  match_degree = NULL,
+  mode = c("strict", "lenient"),
+  strict_floating = TRUE
+) {
+  rlang::check_dots_empty()
+
+  # Store input names before processing
+  glycan_names <- names(glycans)
+
+  params <- prepare_motif_args(
+    glycans = glycans,
+    motifs = motif,
+    alignments = alignment,
+    ignore_linkages = ignore_linkages,
+    match_degree = match_degree,
+    single_motif = TRUE,
+    strict_sub = strict_sub,
+    mode = mode,
+    strict_floating = strict_floating
+  )
+  result <- rlang::exec("have_motif_", !!!params)
+
+  # Apply names to result if input had names
+  if (!is.null(glycan_names)) {
+    names(result) <- glycan_names
+  }
+
+  result
+}
+
+#' @rdname have_motif
+#' @export
+have_motifs <- function(
+  glycans,
+  motifs,
+  ...,
+  alignments = NULL,
+  ignore_linkages = FALSE,
+  strict_sub = TRUE,
+  match_degree = NULL,
+  mode = c("strict", "lenient"),
+  strict_floating = TRUE
+) {
+  rlang::check_dots_empty()
+
+  params <- prepare_motif_args(
+    glycans = glycans,
+    motifs = motifs,
+    alignments = alignments,
+    ignore_linkages = ignore_linkages,
+    match_degree = match_degree,
+    single_motif = FALSE,
+    strict_sub = strict_sub,
+    mode = mode,
+    strict_floating = strict_floating
+  )
+  glycan_names <- prepare_struc_names(glycans, params$glycans)
+  # Use names from resolved motifs if available (e.g., from dynamic_motifs/branch_motifs)
+  # Otherwise fall back to prepare_motif_names on the original input
+  if (!is.null(names(params$motifs))) {
+    motif_names <- names(params$motifs)
+  } else {
+    motif_names <- prepare_motif_names(motifs)
+  }
+  rlang::exec(
+    "have_motifs_",
+    !!!params,
+    glycan_names = glycan_names,
+    motif_names = motif_names
+  )
+}
+
+#' Internal verison of `have_motif()`
+#'
+#' This function skips argument validation and conversion.
+#'
+#' @param glycans A `glyrepr_structure` object.
+#' @param motif A `glyrepr_structure` object with length 1.
+#' @param alignment A character scalar.
+#' @param ignore_linkages A logical value.
+#' @param strict_sub A logical value.
+#'
+#' @noRd
+have_motif_ <- function(
+  glycans,
+  motif,
+  alignment,
+  ignore_linkages = FALSE,
+  strict_sub = TRUE,
+  match_degree = NULL,
+  mode = "strict",
+  strict_floating = TRUE
+) {
+  # This function is a simpler version of `have_motif()`.
+  # It performs the logic directly without argument validations and conversions.
+  # It is a necessary abstraction for other functions.
+  apply_single_motif_to_glycans(
+    glycans = glycans,
+    motif = motif,
+    alignment = alignment,
+    ignore_linkages = ignore_linkages,
+    strict_sub = strict_sub,
+    match_degree = match_degree,
+    mode = mode,
+    strict_floating = strict_floating,
+    single_glycan_func = .have_motif_single,
+    smap_func = glyrepr::smap_lgl,
+    result_type = "logical"
+  )
+}
+
+.have_motif_single <- function(
+  glycan_graph,
+  motif_graph,
+  motif_has_linkages,
+  motif_composition_profile,
+  alignment,
+  ignore_linkages = FALSE,
+  strict_sub = TRUE,
+  match_degree = NULL,
+  mode = "strict",
+  glycan_batch_profile = NULL,
+  motif_batch_profile = NULL,
+  compatibility_cache = NULL
+) {
+  # Optimized version with early termination
+  # Check if any match is valid, returning immediately on first valid match
+  if (
+    !whole_alignment_size_can_match(
+      glycan_graph,
+      motif_graph,
+      alignment,
+      glycan_batch_profile = glycan_batch_profile,
+      motif_batch_profile = motif_batch_profile
+    )
+  ) {
+    return(FALSE)
+  }
+  if (
+    !core_alignment_root_can_match(
+      glycan_graph,
+      motif_graph,
+      alignment,
+      strict_sub = strict_sub,
+      mode = mode,
+      glycan_batch_profile = glycan_batch_profile,
+      motif_batch_profile = motif_batch_profile
+    )
+  ) {
+    return(FALSE)
+  }
+
+  linkage_match_mode <- resolve_linkage_match_mode(
+    glycan_graph,
+    motif_has_linkages,
+    ignore_linkages,
+    mode = mode,
+    glycan_batch_profile = glycan_batch_profile
+  )
+
+  # "none" is an early no-match result: the motif requires linkage information,
+  # but the glycan has none, so no candidate can become valid.
+  if (linkage_match_mode == "none") {
+    return(FALSE)
+  }
+
+  if (
+    !composition_can_match(
+      glycan_graph,
+      motif_composition_profile,
+      glycan_batch_profile = glycan_batch_profile,
+      motif_batch_profile = motif_batch_profile
+    )
+  ) {
+    return(FALSE)
+  }
+
+  res <- perform_compatible_vf2(
+    glycan_graph,
+    motif_graph,
+    alignment = alignment,
+    ignore_linkages = linkage_match_mode == "ignore",
+    strict_sub = strict_sub,
+    match_degree = match_degree,
+    mode = mode,
+    first_only = TRUE,
+    glycan_batch_profile = glycan_batch_profile,
+    motif_batch_profile = motif_batch_profile,
+    compatibility_cache = compatibility_cache
+  )
+  length(res) > 0L
+}
+
+#' Internal verison of `have_motifs()`
+#'
+#' This function skips argument validation and conversion.
+#'
+#' @param glycans A `glyrepr_structure` object.
+#' @param motifs A `glyrepr_structure` object.
+#' @param alignments A character vector with the same length as `motifs`.
+#' @param ignore_linkages A logical value.
+#' @param strict_sub A logical value.
+#' @param match_degree A logical vector or list of logical vectors.
+#'
+#' @noRd
+have_motifs_ <- function(
+  glycans,
+  motifs,
+  alignments,
+  glycan_names,
+  motif_names,
+  ignore_linkages = FALSE,
+  strict_sub = TRUE,
+  match_degree = NULL,
+  mode = "strict",
+  strict_floating = TRUE
+) {
+  apply_motifs_to_glycans(
+    glycans = glycans,
+    motifs = motifs,
+    alignments = alignments,
+    ignore_linkages = ignore_linkages,
+    single_glycan_func = .have_motif_single,
+    glycan_names = glycan_names,
+    motif_names = motif_names,
+    strict_sub = strict_sub,
+    match_degree = match_degree,
+    mode = mode,
+    strict_floating = strict_floating,
+    result_type = "logical"
+  )
+}

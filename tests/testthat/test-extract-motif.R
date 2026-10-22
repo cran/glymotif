@@ -1,3 +1,20 @@
+snapshot_extraction_graphs <- function(graphs) {
+  # Compare graph contents without igraph's lazily initialized pointer/cache.
+  serialize(
+    lapply(graphs, function(graph) {
+      list(
+        directed = igraph::is_directed(graph),
+        vertices = igraph::vcount(graph),
+        edges = igraph::as_edgelist(graph, names = FALSE),
+        graph_attributes = igraph::graph_attr(graph),
+        vertex_attributes = igraph::vertex_attr(graph),
+        edge_attributes = igraph::edge_attr(graph)
+      )
+    }),
+    NULL
+  )
+}
+
 test_that("extract_motif works for intact glycans", {
   glycan <- "Gal(b1-3)[GlcNAc(a1-6)]GalNAc(a1-"
   result <- extract_motif(glycan)
@@ -237,7 +254,7 @@ test_that("native extraction preserves ordered R enumeration and input graphs", 
     "Hex(??-?)[GlcNAc(b1-6)]HexNAc(??-"
   ))
   graphs <- glyrepr::get_structure_graphs(glycans, return_list = TRUE)
-  before <- serialize(graphs, NULL)
+  before <- snapshot_extraction_graphs(graphs)
   for (size in c(0, 1, 2, 2.5, 3, 5, Inf)) {
     seen <- new.env(hash = TRUE, parent = emptyenv())
     expected <- unlist(
@@ -251,7 +268,7 @@ test_that("native extraction preserves ordered R enumeration and input graphs", 
     expect_identical(as.character(actual), as.character(expected))
     expect_identical(names(actual), names(expected))
   }
-  expect_identical(serialize(graphs, NULL), before)
+  expect_identical(snapshot_extraction_graphs(graphs), before)
 })
 
 test_that("native branch extraction deduplicates complete subtrees in order", {
@@ -281,6 +298,29 @@ test_that("native extraction handles empty inputs and singleton structures", {
   expect_length(extract_motif(glyrepr::glycan_structure()), 0L)
   expect_length(extract_branch_motif(glyrepr::glycan_structure()), 0L)
   expect_identical(as.character(extract_motif("Gal(b1-")), "Gal(b1-")
+})
+
+test_that("native extraction preserves character anomers from list contexts", {
+  anomers <- c("a1", "b1", "??", "a1")
+  context <- list(
+    children = rep(list(integer()), length(anomers)),
+    child_linkages = rep(list(character()), length(anomers)),
+    mono = rep("Gal", length(anomers)),
+    sub = rep("", length(anomers)),
+    anomers = anomers
+  )
+  before <- serialize(context, NULL)
+  expected <- lapply(seq_len(3L), function(i) {
+    list(graph = 1L, nodes = i, anomer = anomers[i])
+  })
+
+  for (branches in c(FALSE, TRUE)) {
+    result <- cpp_extract_motif_candidates(
+      list(context), list(seq_along(anomers)), 1, branches
+    )
+    expect_identical(result, expected)
+  }
+  expect_identical(serialize(context, NULL), before)
 })
 
 test_that("native enumeration prunes wide branches before forming products", {

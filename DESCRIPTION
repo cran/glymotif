@@ -1,6 +1,6 @@
 Package: glymotif
 Title: Extract Glycan Motifs from Glycan Structures
-Version: 1.0.0
+Version: 1.0.1
 Authors@R: 
     person("Bin", "Fu", , "23110220018@m.fudan.edu.cn", role = c("aut", "cre", "cph"),
            comment = c(ORCID = "0000-0001-8567-2997"))
@@ -26,8 +26,8 @@ VignetteBuilder: knitr
 BugReports: https://github.com/glycoverse/glymotif/issues
 RoxygenNote: 7.3.3
 NeedsCompilation: yes
-Packaged: 2026-09-27 09:00:14 UTC; fubin
+Packaged: 2026-10-21 10:03:36 UTC; fubin
 Author: Bin Fu [aut, cre, cph] (ORCID: <https://orcid.org/0000-0001-8567-2997>)
 Maintainer: Bin Fu <23110220018@m.fudan.edu.cn>
 Repository: CRAN
-Date/Publication: 2026-10-07 08:30:15 UTC
+Date/Publication: 2026-10-22 04:10:02 UTC

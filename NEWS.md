@@ -1,3 +1,7 @@
+# glymotif 1.0.1
+
+* Fixed installation from source on older versions of R. (#61)
+
 # glymotif 1.0.0
 
 * `extract_motif()` and `extract_branch_motif()` extract motifs faster while preserving motif order. (#59)
